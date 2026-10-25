@@ -382,54 +382,65 @@ async function attemptJoin(rawName, code){
 
   const ref = doc(db, 'teams', slug);
 
-  // First try to join an EXISTING team (adds this browser's uid to members).
+  // Read first (this works cleanly on a non-existent doc thanks to the
+  // `resource == null` clause in the `allow get` rule) so we know for
+  // certain whether this is a brand-new team or an existing one, instead
+  // of inferring it from an update call's error code.
+  let snap;
   try{
-    await updateDoc(ref, { members: arrayUnion(myUid), _accessCodeUsed: code, updatedAt: serverTimestamp() });
-    const snap = await getDoc(ref);
-    teamDocToLocalState(snap.data());
+    snap = await getDoc(ref);
+  } catch(e){
+    console.error('Lookup failed for', slug, e);
+    setGateErr('Could not reach the game database (' + (e.code || e.message) + '). Check your connection and try again.');
+    return;
+  }
+
+  if(!snap.exists()){
+    // Brand-new team name -- create it.
+    try{
+      const initialData = {
+        teamName: rawName.trim(),
+        members: [myUid],
+        score: 0,
+        solved: {...DEFAULT_SOLVED},
+        capturedFlags: {},
+        _accessCodeUsed: code,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      };
+      await setDoc(ref, initialData);
+      await setDoc(doc(db, 'leaderboard', slug), {
+        teamName: rawName.trim(), score: 0, solvedCount: 0, updatedAt: serverTimestamp()
+      });
+      teamDocToLocalState(initialData);
+      teamId = slug;
+      showGame();
+    } catch(e){
+      console.error('Create team failed for', slug, e);
+      setGateErr('Could not create team — check the access code. (' + (e.code || e.message) + ')');
+    }
+    return;
+  }
+
+  const data = snap.data();
+  if((data.members || []).includes(myUid)){
+    // Already a member from this browser -- just resume, no write needed.
+    teamDocToLocalState(data);
     teamId = slug;
     showGame();
     return;
-  } catch(e){
-    if(e.code !== 'not-found'){
-      // Doc exists but something was rejected -- most likely a wrong access
-      // code, or this uid is already a member (harmless, try reading instead).
-      try{
-        const snap = await getDoc(ref);
-        if(snap.exists() && myUid in Object.fromEntries((snap.data().members||[]).map(u=>[u,true]))){
-          teamDocToLocalState(snap.data());
-          teamId = slug;
-          showGame();
-          return;
-        }
-      } catch(_){ /* fall through to error below */ }
-      setGateErr('Could not join "' + rawName + '" — check the access code and try again.');
-      return;
-    }
-    // not-found: no team at this slug yet, fall through to create it.
   }
 
-  // Create a brand-new team.
+  // Team exists, this browser hasn't joined it yet -- try to join.
   try{
-    const initialData = {
-      teamName: rawName.trim(),
-      members: [myUid],
-      score: 0,
-      solved: {...DEFAULT_SOLVED},
-      capturedFlags: {},
-      _accessCodeUsed: code,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp()
-    };
-    await setDoc(ref, initialData);
-    await setDoc(doc(db, 'leaderboard', slug), {
-      teamName: rawName.trim(), score: 0, solvedCount: 0, updatedAt: serverTimestamp()
-    });
-    teamDocToLocalState(initialData);
+    await updateDoc(ref, { members: arrayUnion(myUid), _accessCodeUsed: code, updatedAt: serverTimestamp() });
+    const fresh = await getDoc(ref);
+    teamDocToLocalState(fresh.data());
     teamId = slug;
     showGame();
   } catch(e){
-    setGateErr('Could not create team — check the access code. (' + (e.code || e.message) + ')');
+    console.error('Join team failed for', slug, e);
+    setGateErr('Could not join "' + rawName + '" — check the access code and try again.');
   }
 }
 
