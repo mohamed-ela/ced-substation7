@@ -574,21 +574,51 @@ async function earnFlag(key){
     return;
   }
 
-  teamSolved[key] = true;
-  teamCapturedFlags[key] = answer.flag;
-  teamScore += answer.points;
-  document.getElementById('teamScoreDisplay').textContent = ' · ' + teamScore + ' pts';
-  logRow('FLAG CAPTURED (' + key.toUpperCase() + ', +' + answer.points + ' pts): ' + answer.flag, 'info');
-  renderFlagsPanel();
+  // The teams write succeeded. Re-read the document rather than trusting
+  // our own locally-incremented numbers -- this is the one place client
+  // and server state could otherwise drift apart (e.g. a teammate's
+  // concurrent solve landing between our write and now).
+  try{
+    const fresh = await getDoc(ref);
+    if(fresh.exists()) teamDocToLocalState(fresh.data());
+  } catch(e){
+    console.warn('Post-solve resync failed, using local values:', e.code || e.message);
+    teamSolved[key] = true;
+    teamCapturedFlags[key] = answer.flag;
+    teamScore += answer.points;
+  }
+
+  // UI update is wrapped separately so a DOM problem here can never
+  // silently swallow the leaderboard mirror step below.
+  try{
+    document.getElementById('teamScoreDisplay').textContent = ' · ' + teamScore + ' pts';
+    logRow('FLAG CAPTURED (' + key.toUpperCase() + ', +' + answer.points + ' pts): ' + answer.flag, 'info');
+    renderFlagsPanel();
+  } catch(e){
+    console.error('UI update failed after solving', key, e);
+  }
 
   // Mirror to the public leaderboard. Rules require this to exactly match
   // the just-written score above, so it can never show a fabricated number.
+  // Self-healing: if the mirror doc somehow doesn't exist yet, create it
+  // instead of just failing (this is the scenario that leaves a team
+  // showing solved questions but a leaderboard score stuck at 0).
   try{
     const solvedCount = Object.values(teamSolved).filter(Boolean).length;
-    await updateDoc(doc(db, 'leaderboard', teamId), {
-      score: teamScore, solvedCount, updatedAt: serverTimestamp()
-    });
-  } catch(e){ console.warn('Leaderboard mirror update failed:', e.code || e.message); }
+    const lbRef = doc(db, 'leaderboard', teamId);
+    try{
+      await updateDoc(lbRef, { score: teamScore, solvedCount, updatedAt: serverTimestamp() });
+    } catch(e){
+      if(e.code === 'not-found'){
+        await setDoc(lbRef, { teamName, score: teamScore, solvedCount, updatedAt: serverTimestamp() });
+      } else {
+        throw e;
+      }
+    }
+  } catch(e){
+    console.warn('Leaderboard mirror update failed:', e.code || e.message);
+    logRow('Your score saved, but the public leaderboard didn\'t update (' + (e.code || e.message) + '). Your own progress is safe either way.', 'caution');
+  }
 }
 
 /* ---------- logging / banner ---------- */
