@@ -154,7 +154,7 @@
   <div class="topbar">
     <div class="brand"><span class="co">CENTRAL ELECTRIC DISTRIBUTION</span><span class="unit">SUBSTATION 7 — SCADA CONTROL SIMULATOR</span></div>
     <div style="display:flex;align-items:center;gap:14px;">
-      <span class="teambadge" id="teamBadge">Not joined<span class="score" id="teamScoreDisplay"></span></span>
+      <span class="teambadge" id="teamBadge"><span id="teamNameDisplay">Not joined</span><span class="score" id="teamScoreDisplay"></span></span>
       <span class="clock" id="clock">00:00:00</span>
       <span class="statuspill" id="statusPill">NORMAL</span>
     </div>
@@ -363,7 +363,7 @@ function setGateErr(text){ document.getElementById('gateErr').textContent = text
 function showGame(){
   document.getElementById('gateOverlay').style.display = 'none';
   document.getElementById('mainWrap').style.display = '';
-  document.getElementById('teamBadge').textContent = teamName;
+  document.getElementById('teamNameDisplay').textContent = teamName;
   const scoreEl = document.getElementById('teamScoreDisplay');
   scoreEl.textContent = ' · ' + teamScore + ' pts';
   localStorage.setItem('ced_team_slug', teamId);
