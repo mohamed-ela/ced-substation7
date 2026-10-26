@@ -484,7 +484,14 @@ signInAnonymously(auth).catch((e) => setGateStatus('Connection error: ' + e.mess
 /* ---------- leaderboard (public, realtime) ---------- */
 function startLeaderboardListener(){
   if(leaderboardUnsub) return;
-  const q = query(collection(db, 'leaderboard'), orderBy('score','desc'), orderBy('updatedAt','asc'), limit(50));
+  // Single-field orderBy only -- Firestore indexes every field for this
+  // automatically. A second orderBy (e.g. updatedAt as a tiebreaker) would
+  // need a composite index created manually in the Console first, and
+  // until that index exists the query fails silently from the UI's point
+  // of view (the panel just never gets past "Loading..."). Not worth the
+  // operational step for a tiebreaker -- see 07_Firebase_Setup_Guide.md
+  // if you want it back later.
+  const q = query(collection(db, 'leaderboard'), orderBy('score','desc'), limit(50));
   leaderboardUnsub = onSnapshot(q, (snap) => {
     const panel = document.getElementById('leaderboardPanel');
     panel.innerHTML = '';
