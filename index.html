@@ -174,13 +174,16 @@
         </div>
         <select id="exampleSelect">
           <option value="">Load a worked example…</option>
-          <option value="0">Read Coils 0-5 (FC 0x01)</option>
-          <option value="1">Close Generator Breaker (FC 0x05)</option>
+          <option value="0">Read Coils, out-of-range (FC 0x01)</option>
+          <option value="1">Close one breaker (FC 0x05)</option>
           <option value="2">Set Generator Output to 15.0 MW (FC 0x06)</option>
-          <option value="3">Close Both Transformer Breakers (FC 0x0F)</option>
-          <option value="4">Invalid Coil Value — triggers exception (FC 0x05)</option>
+          <option value="3">Clear two coils at once (FC 0x0F)</option>
+          <option value="4">Invalid address — triggers exception (FC 0x05)</option>
         </select>
         <div class="example-note" id="exampleNote"></div>
+        <div style="font-size:10px;color:var(--text-dim);margin-top:6px;font-family:'IBM Plex Mono',monospace;">
+          Examples never award credit, even sent as-is — they teach packet shape, not answers.
+        </div>
 
         <details class="ref">
           <summary>Modbus/TCP quick reference</summary>
@@ -729,6 +732,13 @@ document.getElementById('sendBtn').addEventListener('click', () => {
     return;
   }
 
+  // Computed up front so every flag-granting path below can check it.
+  // A packet that's byte-for-byte identical to one of the worked examples
+  // never earns credit, no matter which question it would otherwise match --
+  // this holds even if a future edit to `examples` reintroduces an overlap.
+  const normalized = raw.replace(/0x/gi,'').replace(/[^0-9a-fA-F]/g,'').toUpperCase();
+  const isKnownExample = EXAMPLE_HEXES.has(normalized);
+
   let result;
   try{ result = decodeAndApply(bytes); }
   catch(e){
@@ -736,7 +746,7 @@ document.getElementById('sendBtn').addEventListener('click', () => {
       const fieldsHtml = (e.fields||[]).map(f=>'<tr><td>'+f[0]+'</td><td class="v">'+f[1]+'</td></tr>').join('');
       decodeOut.innerHTML = '<table>'+fieldsHtml+'</table><div class="summary err">MODBUS EXCEPTION 0x'+e.code+' — '+e.name+': '+e.msg+'</div>';
       logRow('Exception '+e.code+' ('+e.name+') on FC 0x'+(e.fc||0).toString(16)+': '+e.msg, 'danger');
-      if(e.code === 3) earnFlag('q9');
+      if(e.code === 3 && !isKnownExample) earnFlag('q9');
     } else {
       decodeOut.innerHTML = '<div class="summary err">FORMAT ERROR: '+e.msg+'</div>';
       logRow('Packet rejected: '+e.msg, 'danger');
@@ -750,11 +760,17 @@ document.getElementById('sendBtn').addEventListener('click', () => {
     '<div class="resp">Simulated response: '+result.respHex+'</div>';
   logRow(result.summary, 'info');
 
-  result.flagHooks.forEach(h => earnFlag(h));
+  if(isKnownExample){
+    if(result.flagHooks.length){
+      logRow('That matches a worked example exactly — no credit for sending it unmodified. Change an address or value and try your own.', 'caution');
+    }
+  } else {
+    result.flagHooks.forEach(h => earnFlag(h));
+  }
 
-  // replay detection
-  const normalized = raw.replace(/0x/gi,'').replace(/[^0-9a-fA-F]/g,'').toUpperCase();
-  if(lastSentRaw !== null && normalized === lastSentRaw){
+  // replay detection (also skipped for known examples -- replaying a demo
+  // packet isn't the lesson; replaying one you actually built yourself is)
+  if(!isKnownExample && lastSentRaw !== null && normalized === lastSentRaw){
     logRow('Identical packet replayed — device accepted it again with no session, nonce, or timestamp check.', 'caution');
     earnFlag('q10');
   }
@@ -765,18 +781,25 @@ document.getElementById('sendBtn').addEventListener('click', () => {
 
 document.getElementById('clearBtn').addEventListener('click', () => { document.getElementById('pktInput').value=''; });
 
-/* ---------- examples ---------- */
+/* ---------- examples ----------
+   None of these may ever satisfy a graded question's condition, even
+   though they're fully valid, sendable packets -- they're deliberately
+   built against addresses/outcomes no flag checks for (an out-of-range
+   read, a lone feeder breaker that can't complete Q6 by itself, a
+   register no flag reads, a multi-coil write that clears bits instead
+   of setting them, an out-of-range write). See the EXAMPLE_HEXES guard
+   below for a second, independent backstop against this. */
 const examples = {
-  '0': {hex:'00 01 00 00 00 06 01 01 00 00 00 06',
-        note:'Read Coils (FC 0x01): start address 0, quantity 6 — confirms the slave is reachable and reads all six breaker states before you touch anything.'},
-  '1': {hex:'00 02 00 00 00 06 01 05 00 00 FF 00',
-        note:'Write Single Coil (FC 0x05): coil 0 (CB_GEN) → 0xFF00 = ON. This is the minimal "close a breaker" packet.'},
+  '0': {hex:'00 01 00 00 00 06 01 01 00 04 00 04',
+        note:'Read Coils (FC 0x01): start address 4, quantity 4 — covers addresses 4 through 7. Only 0-5 are valid, so this deliberately overruns the range. Watch the decode panel for Modbus exception 0x02 — ILLEGAL DATA ADDRESS — this is what a correctly-formed-but-out-of-bounds request looks like.'},
+  '1': {hex:'00 02 00 00 00 06 01 05 00 05 FF 00',
+        note:'Write Single Coil (FC 0x05): coil 5 (CB_FEED2) → 0xFF00 = ON. Shows the minimal "close one breaker" packet shape — the questions ask you to apply this same shape to other coils yourself.'},
   '2': {hex:'00 03 00 00 00 06 01 06 00 00 00 96',
         note:'Write Single Register (FC 0x06): register 0 (GEN_SETPOINT) = 0x0096 = 150 → 15.0 MW.'},
-  '3': {hex:'00 04 00 00 00 08 01 0F 00 01 00 02 01 03',
-        note:'Write Multiple Coils (FC 0x0F): start address 1, quantity 2, byte count 1, data 0x03 (binary 00000011) → coil 1 (CB_XFMR_HV) and coil 2 (CB_XFMR_LV) both ON in a single packet.'},
-  '4': {hex:'00 05 00 00 00 06 01 05 00 00 12 34',
-        note:'Write Single Coil with an invalid value (0x1234 is neither 0xFF00 nor 0x0000). Watch the decode panel for Modbus exception 0x03 — ILLEGAL DATA VALUE.'}
+  '3': {hex:'00 04 00 00 00 08 01 0F 00 00 00 02 01 00',
+        note:'Write Multiple Coils (FC 0x0F): start address 0, quantity 2, byte count 1, data 0x00 (binary 00000000) → coils 0 and 1 both OFF in a single packet. Multi-coil writes pack bits the same way whether you\'re setting or clearing them.'},
+  '4': {hex:'00 05 00 00 00 06 01 05 00 09 FF 00',
+        note:'Write Single Coil targeting address 9, which doesn\'t exist (valid range is 0-5) — a perfectly normal value, but Modbus has nothing at that address. Watch for Modbus exception 0x02 — ILLEGAL DATA ADDRESS.'}
 };
 document.getElementById('exampleSelect').addEventListener('change', (e) => {
   const ex = examples[e.target.value];
@@ -786,6 +809,12 @@ document.getElementById('exampleSelect').addEventListener('change', (e) => {
   note.textContent = ex.note;
   note.style.display = 'block';
 });
+
+// Second, independent backstop: even if a future edit to `examples` ever
+// reintroduces an overlap with a graded condition, sending one of these
+// exact byte sequences verbatim can never award a flag. Only a packet
+// that differs from every known example earns credit.
+const EXAMPLE_HEXES = new Set(Object.values(examples).map(e => e.hex.replace(/\s+/g,'').toUpperCase()));
 
 /* ---------- reset ---------- */
 // (no reset button per compact layout; state persists for the session — add one easily if needed)
