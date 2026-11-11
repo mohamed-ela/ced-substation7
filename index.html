@@ -154,7 +154,7 @@
   <div class="topbar">
     <div class="brand"><span class="co">CENTRAL ELECTRIC DISTRIBUTION</span><span class="unit">SUBSTATION 7 — SCADA CONTROL SIMULATOR</span></div>
     <div style="display:flex;align-items:center;gap:14px;">
-      <span class="teambadge" id="teamBadge"><span id="teamNameDisplay">Not joined</span><span class="score" id="teamScoreDisplay"></span></span>
+      <span class="teambadge" id="teamBadge">Not joined<span class="score" id="teamScoreDisplay"></span></span>
       <span class="clock" id="clock">00:00:00</span>
       <span class="statuspill" id="statusPill">NORMAL</span>
     </div>
@@ -167,7 +167,7 @@
     <div>
       <div class="panel">
         <h2>Modbus/TCP Command Console</h2>
-        <textarea id="pktInput" placeholder="00 01 00 00 00 06 01 05 00 00 FF 00"></textarea>
+        <textarea id="pktInput" placeholder="00 01 00 00 00 06 00 00 00 00 FF 00"></textarea>
         <div class="btnrow">
           <button class="send" id="sendBtn">SEND</button>
           <button class="ghost" id="clearBtn">CLEAR</button>
@@ -363,7 +363,7 @@ function setGateErr(text){ document.getElementById('gateErr').textContent = text
 function showGame(){
   document.getElementById('gateOverlay').style.display = 'none';
   document.getElementById('mainWrap').style.display = '';
-  document.getElementById('teamNameDisplay').textContent = teamName;
+  document.getElementById('teamBadge').textContent = teamName;
   const scoreEl = document.getElementById('teamScoreDisplay');
   scoreEl.textContent = ' · ' + teamScore + ' pts';
   localStorage.setItem('ced_team_slug', teamId);
@@ -671,20 +671,45 @@ function decodeAndApply(bytes){
   const pdu = bytes.slice(7);
   const fc = pdu[0];
 
+  const lengthOk = (length === pdu.length + 1);
   const fields = [
     ['Transaction ID', '0x'+txnId.toString(16).padStart(4,'0'), '(not checked — any value accepted)'],
     ['Protocol ID', '0x'+protoId.toString(16).padStart(4,'0'), 'OK'],
-    ['Length', length, (length===pdu.length+1 ? 'matches payload' : 'MISMATCH — proceeding anyway')],
+    ['Length', length, (lengthOk ? 'matches payload' : 'MISMATCH — packet rejected')],
     ['Unit ID', unitId, '(not authenticated — any value accepted)'],
     ['Function Code', '0x'+fc.toString(16).padStart(2,'0'), '']
   ];
 
+  // In real Modbus/TCP, Length is exactly how a receiver frames the message
+  // on the wire -- it's not a decorative field. A wrong value here is a
+  // malformed packet, not a warning to note and proceed past. Rejecting it
+  // also closes off a free-points route: a correct FC05/0x0F/etc. payload
+  // wrapped in a deliberately-wrong Length field used to still execute.
+  if(!lengthOk){
+    throw {kind:'format', fields,
+      msg:'Length field says ' + length + ', but Unit ID + PDU actually totals ' + (pdu.length+1) +
+          ' bytes. A real device uses this field to know where the message ends on the wire -- ' +
+          'get it wrong and the frame is malformed, not merely suspicious.'};
+  }
+
   let summary = '', respPduBytes = null, flagHooks = [];
 
+  // Protocol-defined ceilings (independent of this device's tiny 6-coil/
+  // 5-register map) -- per the Modbus spec's own validation order, a
+  // quantity that's zero or exceeds the FC's absolute max is ILLEGAL DATA
+  // VALUE (exception 3), checked BEFORE the device-specific address range
+  // (exception 2). Real stacks (e.g. FreeModbus) also return ILLEGAL DATA
+  // VALUE for a PDU that's the wrong length for its function code, and for
+  // a write-multiple byte-count that doesn't match quantity -- both are
+  // "a fault in the structure of the request," which is exactly what
+  // exception 3 covers, not a silent non-Modbus rejection.
+  const QTY_MAX = {0x01:2000, 0x03:125, 0x0F:1968, 0x10:123};
+
   if(fc === 0x01){ // Read Coils
-    if(pdu.length !== 5) throw {kind:'format', msg:'Read Coils PDU must be 5 bytes (FC+addr+qty).', fields};
+    if(pdu.length !== 5) throw {kind:'exception', code:3, name:EXC_NAMES[3], reason:'bad_pdu_length', msg:'Read Coils PDU must be exactly 5 bytes (FC+addr+qty) -- a malformed request structure, per spec, is ILLEGAL DATA VALUE.', fields, txnId, unitId, fc};
     const addr = (pdu[1]<<8)|pdu[2], qty = (pdu[3]<<8)|pdu[4];
-    if(addr<0 || addr+qty>6 || qty<1) throw {kind:'exception', code:2, name:EXC_NAMES[2], msg:'Coil address/quantity out of range (valid: 0-5).', fields, txnId, unitId, fc};
+    if(qty<1 || qty>QTY_MAX[0x01]) throw {kind:'exception', code:3, name:EXC_NAMES[3], reason:'qty_invalid', msg:'Quantity of coils must be 1-'+QTY_MAX[0x01]+', got '+qty+'.', fields, txnId, unitId, fc};
+    if(addr<0 || addr+qty>6) throw {kind:'exception', code:2, name:EXC_NAMES[2], msg:'Coil address/quantity out of range (valid: 0-5).', fields, txnId, unitId, fc};
     const slice = coils.slice(addr, addr+qty);
     respPduBytes = [0x01, Math.ceil(qty/8)].concat(packBits(slice));
     summary = 'Read Coils @ '+addr+'..'+(addr+qty-1)+' → ['+slice.map(b=>b?'1':'0').join(',')+']';
@@ -693,9 +718,10 @@ function decodeAndApply(bytes){
     fields.push(['Quantity', qty, '']);
   }
   else if(fc === 0x03){ // Read Holding Registers
-    if(pdu.length !== 5) throw {kind:'format', msg:'Read Holding Registers PDU must be 5 bytes.', fields};
+    if(pdu.length !== 5) throw {kind:'exception', code:3, name:EXC_NAMES[3], reason:'bad_pdu_length', msg:'Read Holding Registers PDU must be exactly 5 bytes.', fields, txnId, unitId, fc};
     const addr = (pdu[1]<<8)|pdu[2], qty = (pdu[3]<<8)|pdu[4];
-    if(addr<0 || addr+qty>5 || qty<1) throw {kind:'exception', code:2, name:EXC_NAMES[2], msg:'Register address/quantity out of range (valid: 0-4).', fields, txnId, unitId, fc};
+    if(qty<1 || qty>QTY_MAX[0x03]) throw {kind:'exception', code:3, name:EXC_NAMES[3], reason:'qty_invalid', msg:'Quantity of registers must be 1-'+QTY_MAX[0x03]+', got '+qty+'.', fields, txnId, unitId, fc};
+    if(addr<0 || addr+qty>5) throw {kind:'exception', code:2, name:EXC_NAMES[2], msg:'Register address/quantity out of range (valid: 0-4).', fields, txnId, unitId, fc};
     const slice = regs.slice(addr, addr+qty);
     const dataBytes = []; slice.forEach(v => { dataBytes.push((v>>8)&0xFF); dataBytes.push(v&0xFF); });
     respPduBytes = [0x03, slice.length*2].concat(dataBytes);
@@ -703,10 +729,10 @@ function decodeAndApply(bytes){
     fields.push(['Start Address', addr, '']); fields.push(['Quantity', qty, '']);
   }
   else if(fc === 0x05){ // Write Single Coil
-    if(pdu.length !== 5) throw {kind:'format', msg:'Write Single Coil PDU must be 5 bytes (FC+addr+value).', fields};
+    if(pdu.length !== 5) throw {kind:'exception', code:3, name:EXC_NAMES[3], reason:'bad_pdu_length', msg:'Write Single Coil PDU must be exactly 5 bytes (FC+addr+value).', fields, txnId, unitId, fc};
     const addr = (pdu[1]<<8)|pdu[2], val = (pdu[3]<<8)|pdu[4];
+    if(val !== 0xFF00 && val !== 0x0000) throw {kind:'exception', code:3, name:EXC_NAMES[3], reason:'bad_coil_value', msg:'Coil value must be 0xFF00 (ON) or 0x0000 (OFF), got 0x'+val.toString(16)+'.', fields, txnId, unitId, fc};
     if(addr<0 || addr>5) throw {kind:'exception', code:2, name:EXC_NAMES[2], msg:'Coil address out of range (valid: 0-5).', fields, txnId, unitId, fc};
-    if(val !== 0xFF00 && val !== 0x0000) throw {kind:'exception', code:3, name:EXC_NAMES[3], msg:'Coil value must be 0xFF00 (ON) or 0x0000 (OFF), got 0x'+val.toString(16)+'.', fields, txnId, unitId, fc, flagHooks:['q9']};
     coils[addr] = (val === 0xFF00);
     respPduBytes = pdu.slice(); // FC05 echoes the request
     summary = 'Write Single Coil @ '+addr+' ('+coilNames[addr]+') = '+(coils[addr]?'ON':'OFF');
@@ -714,7 +740,7 @@ function decodeAndApply(bytes){
     if(addr===0 && coils[0]) flagHooks.push('q2');
   }
   else if(fc === 0x06){ // Write Single Register
-    if(pdu.length !== 5) throw {kind:'format', msg:'Write Single Register PDU must be 5 bytes.', fields};
+    if(pdu.length !== 5) throw {kind:'exception', code:3, name:EXC_NAMES[3], reason:'bad_pdu_length', msg:'Write Single Register PDU must be exactly 5 bytes.', fields, txnId, unitId, fc};
     const addr = (pdu[1]<<8)|pdu[2], val = (pdu[3]<<8)|pdu[4];
     if(addr<0 || addr>4) throw {kind:'exception', code:2, name:EXC_NAMES[2], msg:'Register address out of range (valid: 0-4).', fields, txnId, unitId, fc};
     regs[addr] = val;
@@ -724,11 +750,12 @@ function decodeAndApply(bytes){
     fields.push(['Address', addr, '']); fields.push(['Value', val, '']);
   }
   else if(fc === 0x0F){ // Write Multiple Coils
-    if(pdu.length < 7) throw {kind:'format', msg:'Write Multiple Coils PDU too short.', fields};
+    if(pdu.length < 6) throw {kind:'exception', code:3, name:EXC_NAMES[3], reason:'bad_pdu_length', msg:'Write Multiple Coils PDU is too short to contain even a byte-count field.', fields, txnId, unitId, fc};
     const addr = (pdu[1]<<8)|pdu[2], qty = (pdu[3]<<8)|pdu[4], byteCount = pdu[5];
     const coilBytes = pdu.slice(6);
-    if(byteCount !== coilBytes.length || byteCount !== Math.ceil(qty/8)) throw {kind:'format', msg:'Byte count does not match quantity/data supplied.', fields};
-    if(addr<0 || addr+qty>6 || qty<1) throw {kind:'exception', code:2, name:EXC_NAMES[2], msg:'Coil address/quantity out of range (valid: 0-5).', fields, txnId, unitId, fc};
+    if(qty<1 || qty>QTY_MAX[0x0F]) throw {kind:'exception', code:3, name:EXC_NAMES[3], reason:'qty_invalid', msg:'Quantity of outputs must be 1-'+QTY_MAX[0x0F]+', got '+qty+'.', fields, txnId, unitId, fc};
+    if(byteCount !== coilBytes.length || byteCount !== Math.ceil(qty/8)) throw {kind:'exception', code:3, name:EXC_NAMES[3], reason:'byte_count_mismatch', msg:'Byte count ('+byteCount+') does not match what quantity '+qty+' requires (Math.ceil('+qty+'/8) = '+Math.ceil(qty/8)+') or the data actually supplied ('+coilBytes.length+' bytes).', fields, txnId, unitId, fc};
+    if(addr<0 || addr+qty>6) throw {kind:'exception', code:2, name:EXC_NAMES[2], msg:'Coil address/quantity out of range (valid: 0-5).', fields, txnId, unitId, fc};
     const touched = [];
     for(let i=0;i<qty;i++){ const bit = (coilBytes[Math.floor(i/8)] >> (i%8)) & 1; coils[addr+i] = !!bit; touched.push(addr+i); }
     respPduBytes = [0x0F, pdu[1], pdu[2], pdu[3], pdu[4]];
@@ -737,11 +764,12 @@ function decodeAndApply(bytes){
     if(touched.includes(1) && touched.includes(2) && coils[1] && coils[2]) flagHooks.push('q4');
   }
   else if(fc === 0x10){ // Write Multiple Registers
-    if(pdu.length < 6) throw {kind:'format', msg:'Write Multiple Registers PDU too short.', fields};
+    if(pdu.length < 6) throw {kind:'exception', code:3, name:EXC_NAMES[3], reason:'bad_pdu_length', msg:'Write Multiple Registers PDU is too short to contain even a byte-count field.', fields, txnId, unitId, fc};
     const addr = (pdu[1]<<8)|pdu[2], qty = (pdu[3]<<8)|pdu[4], byteCount = pdu[5];
     const dataBytes = pdu.slice(6);
-    if(byteCount !== dataBytes.length || byteCount !== qty*2) throw {kind:'format', msg:'Byte count does not match quantity/data supplied.', fields};
-    if(addr<0 || addr+qty>5 || qty<1) throw {kind:'exception', code:2, name:EXC_NAMES[2], msg:'Register address/quantity out of range (valid: 0-4).', fields, txnId, unitId, fc};
+    if(qty<1 || qty>QTY_MAX[0x10]) throw {kind:'exception', code:3, name:EXC_NAMES[3], reason:'qty_invalid', msg:'Quantity of registers must be 1-'+QTY_MAX[0x10]+', got '+qty+'.', fields, txnId, unitId, fc};
+    if(byteCount !== dataBytes.length || byteCount !== qty*2) throw {kind:'exception', code:3, name:EXC_NAMES[3], reason:'byte_count_mismatch', msg:'Byte count ('+byteCount+') does not match what quantity '+qty+' requires ('+(qty*2)+' bytes) or the data actually supplied ('+dataBytes.length+' bytes).', fields, txnId, unitId, fc};
+    if(addr<0 || addr+qty>5) throw {kind:'exception', code:2, name:EXC_NAMES[2], msg:'Register address/quantity out of range (valid: 0-4).', fields, txnId, unitId, fc};
     for(let i=0;i<qty;i++){ const v = (dataBytes[i*2]<<8)|dataBytes[i*2+1]; regs[addr+i] = v; if(addr+i>0) regOverride[addr+i] = true; }
     respPduBytes = [0x10, pdu[1], pdu[2], pdu[3], pdu[4]];
     summary = 'Write Multiple Registers @ '+addr+'..'+(addr+qty-1);
@@ -783,9 +811,16 @@ document.getElementById('sendBtn').addEventListener('click', () => {
       const fieldsHtml = (e.fields||[]).map(f=>'<tr><td>'+f[0]+'</td><td class="v">'+f[1]+'</td></tr>').join('');
       decodeOut.innerHTML = '<table>'+fieldsHtml+'</table><div class="summary err">MODBUS EXCEPTION 0x'+e.code+' — '+e.name+': '+e.msg+'</div>';
       logRow('Exception '+e.code+' ('+e.name+') on FC 0x'+(e.fc||0).toString(16)+': '+e.msg, 'danger');
-      if(e.code === 3 && !isKnownExample) earnFlag('q9');
+      // Scoped to the specific lesson Q9 is about (the FC05 ON/OFF value
+      // encoding) -- not just "any exception 3," now that quantity, byte
+      // count, and PDU-length faults correctly produce code 3 as well.
+      if(e.code === 3 && e.reason === 'bad_coil_value' && !isKnownExample) earnFlag('q9');
     } else {
-      decodeOut.innerHTML = '<div class="summary err">FORMAT ERROR: '+e.msg+'</div>';
+      // Show the field breakdown too when we have one (e.g. a Length
+      // mismatch gets this far before rejecting) -- helps show exactly
+      // what was parsed versus what was expected, not just that it failed.
+      const fieldsHtml = (e.fields||[]).map(f=>'<tr><td>'+f[0]+'</td><td class="v">'+f[1]+'</td></tr>').join('');
+      decodeOut.innerHTML = (fieldsHtml ? '<table>'+fieldsHtml+'</table>' : '') + '<div class="summary err">FORMAT ERROR: '+e.msg+'</div>';
       logRow('Packet rejected: '+e.msg, 'danger');
     }
     return;
